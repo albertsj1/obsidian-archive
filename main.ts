@@ -440,8 +440,9 @@ export default class SimpleArchiver extends Plugin {
 			return false;
 		}
 
-		// Evaluate based on logic operator
-		if (rule.logicOperator === "OR") {
+		// Evaluate based on logic operator (default to AND for backward compatibility)
+		const operator = rule.logicOperator || "AND";
+		if (operator === "OR") {
 			// OR logic: at least one condition must be met
 			for (const condition of rule.conditions) {
 				if (await this.evaluateCondition(file, condition)) {
@@ -502,11 +503,20 @@ export default class SimpleArchiver extends Plugin {
 		);
 		
 		// Ensure backward compatibility: set default logicOperator for existing rules
+		let needsSave = false;
 		if (this.settings.autoArchiveRules) {
-			this.settings.autoArchiveRules = this.settings.autoArchiveRules.map(rule => ({
-				...rule,
-				logicOperator: rule.logicOperator || "AND"
-			}));
+			this.settings.autoArchiveRules = this.settings.autoArchiveRules.map(rule => {
+				if (!rule.logicOperator) {
+					needsSave = true;
+					return { ...rule, logicOperator: "AND" as "AND" | "OR" };
+				}
+				return rule;
+			});
+		}
+		
+		// Persist the migration
+		if (needsSave) {
+			await this.saveSettings();
 		}
 	}
 
@@ -887,7 +897,7 @@ class SimpleArchiverSettingsTab extends PluginSettingTab {
 			// Show logic operator if multiple conditions
 			if (rule.conditions.length > 1) {
 				conditionsEl.createEl("div", {
-					text: `Logic: ${rule.logicOperator}`,
+					text: `Logic: ${rule.logicOperator || "AND"}`,
 					cls: "auto-archive-rule-logic"
 				});
 			}
