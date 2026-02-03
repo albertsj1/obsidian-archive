@@ -66,6 +66,13 @@ If your plugin does not need CSS, delete this file.
 	color: var(--text-muted);
 }
 
+.auto-archive-rule-logic {
+	margin-top: 4px;
+	margin-bottom: 8px;
+	font-weight: 600;
+	color: var(--text-accent);
+}
+
 .auto-archive-rule-condition {
 	margin-top: 4px;
 }

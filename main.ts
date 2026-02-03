@@ -22,6 +22,7 @@ interface AutoArchiveRule {
 	enabled: boolean;
 	folderPath: string;
 	conditions: AutoArchiveCondition[];
+	logicOperator: "AND" | "OR";
 }
 
 interface SimpleArchiverSettings {
@@ -421,7 +422,7 @@ export default class SimpleArchiver extends Plugin {
 		}
 
 		if (totalArchived > 0) {
-			new Notice(`Auto-archive: ${totalArchived} files archived`);
+			console.log(`Auto-archive: ${totalArchived} files archived`);
 		}
 	}
 
@@ -434,14 +435,29 @@ export default class SimpleArchiver extends Plugin {
 			return false;
 		}
 
-		// All conditions must be met (AND logic)
-		for (const condition of rule.conditions) {
-			if (!(await this.evaluateCondition(file, condition))) {
-				return false;
-			}
+		// No conditions means no match
+		if (rule.conditions.length === 0) {
+			return false;
 		}
 
-		return rule.conditions.length > 0;
+		// Evaluate based on logic operator
+		if (rule.logicOperator === "OR") {
+			// OR logic: at least one condition must be met
+			for (const condition of rule.conditions) {
+				if (await this.evaluateCondition(file, condition)) {
+					return true;
+				}
+			}
+			return false;
+		} else {
+			// AND logic: all conditions must be met
+			for (const condition of rule.conditions) {
+				if (!(await this.evaluateCondition(file, condition))) {
+					return false;
+				}
+			}
+			return true;
+		}
 	}
 
 	private async evaluateCondition(
@@ -484,6 +500,14 @@ export default class SimpleArchiver extends Plugin {
 			DEFAULT_SETTINGS,
 			await this.loadData()
 		);
+		
+		// Ensure backward compatibility: set default logicOperator for existing rules
+		if (this.settings.autoArchiveRules) {
+			this.settings.autoArchiveRules = this.settings.autoArchiveRules.map(rule => ({
+				...rule,
+				logicOperator: rule.logicOperator || "AND"
+			}));
+		}
 	}
 
 	async saveSettings() {
@@ -563,8 +587,22 @@ class AutoArchiveRuleModal extends Modal {
 					});
 			});
 
+		// Logic operator setting
+		new Setting(contentEl)
+			.setName("Logic operator")
+			.setDesc("How to combine multiple conditions")
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("AND", "AND (all conditions must match)")
+					.addOption("OR", "OR (any condition must match)")
+					.setValue(this.rule.logicOperator || "AND")
+					.onChange((value) => {
+						this.rule.logicOperator = value as "AND" | "OR";
+					})
+			);
+
 		// Conditions section
-		contentEl.createEl("h3", { text: "Conditions (all must be met)" });
+		contentEl.createEl("h3", { text: "Conditions" });
 
 		const conditionsContainer = contentEl.createDiv({ cls: "auto-archive-conditions-container" });
 		this.displayConditions(conditionsContainer);
@@ -846,6 +884,13 @@ class SimpleArchiverSettingsTab extends PluginSettingTab {
 				cls: "setting-item-description"
 			});
 		} else {
+			// Show logic operator if multiple conditions
+			if (rule.conditions.length > 1) {
+				conditionsEl.createEl("div", {
+					text: `Logic: ${rule.logicOperator}`,
+					cls: "auto-archive-rule-logic"
+				});
+			}
 			for (const condition of rule.conditions) {
 				const conditionText = this.getConditionText(condition);
 				conditionsEl.createEl("div", {
@@ -870,7 +915,8 @@ class SimpleArchiverSettingsTab extends PluginSettingTab {
 			id: crypto.randomUUID(),
 			enabled: true,
 			folderPath: "",
-			conditions: []
+			conditions: [],
+			logicOperator: "AND"
 		};
 
 		this.plugin.settings.autoArchiveRules.push(newRule);
