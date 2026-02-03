@@ -11,8 +11,22 @@ import {
 	TAbstractFile,
 } from "obsidian";
 
+interface AutoArchiveCondition {
+	type: "fileAge" | "regexPattern";
+	value: string; // For fileAge: number in days, for regexPattern: regex string
+}
+
+interface AutoArchiveRule {
+	id: string;
+	enabled: boolean;
+	folderPath: string;
+	conditions: AutoArchiveCondition[];
+}
+
 interface SimpleArchiverSettings {
 	archiveFolder: string;
+	autoArchiveRules: AutoArchiveRule[];
+	autoArchiveFrequency: number; // in minutes
 }
 
 interface ArchiveResult {
@@ -22,10 +36,13 @@ interface ArchiveResult {
 
 const DEFAULT_SETTINGS: SimpleArchiverSettings = {
 	archiveFolder: "Archive",
+	autoArchiveRules: [],
+	autoArchiveFrequency: 60, // default 60 minutes
 };
 
 export default class SimpleArchiver extends Plugin {
 	settings: SimpleArchiverSettings;
+	autoArchiveInterval: number | null = null;
 
 	async onload() {
 		await this.loadSettings();
@@ -81,6 +98,9 @@ export default class SimpleArchiver extends Plugin {
 		});
 
 		this.addSettingTab(new SimpleArchiverSettingsTab(this.app, this));
+
+		// Start auto-archive job
+		this.scheduleAutoArchive();
 
 		// Archive file context menu
 		this.registerEvent(
@@ -338,6 +358,125 @@ export default class SimpleArchiver extends Plugin {
 		new Notice(`${unarchived} files unarchived`);
 	}
 
+	onunload() {
+		// Clean up auto-archive interval
+		if (this.autoArchiveInterval !== null) {
+			window.clearInterval(this.autoArchiveInterval);
+			this.autoArchiveInterval = null;
+		}
+	}
+
+	scheduleAutoArchive() {
+		// Clear existing interval if any
+		if (this.autoArchiveInterval !== null) {
+			window.clearInterval(this.autoArchiveInterval);
+		}
+
+		// Schedule new interval
+		const intervalMs = this.settings.autoArchiveFrequency * 60 * 1000;
+		this.autoArchiveInterval = window.setInterval(
+			() => this.processAutoArchiveRules(),
+			intervalMs
+		);
+	}
+
+	async processAutoArchiveRules() {
+		const enabledRules = this.settings.autoArchiveRules.filter(
+			(rule) => rule.enabled
+		);
+
+		if (enabledRules.length === 0) {
+			return;
+		}
+
+		let totalArchived = 0;
+
+		for (const rule of enabledRules) {
+			const folder = this.app.vault.getFolderByPath(
+				normalizePath(rule.folderPath)
+			);
+
+			if (!folder) {
+				continue;
+			}
+
+			const filesToArchive = [];
+
+			for (const child of folder.children) {
+				if (child.hasOwnProperty("extension")) {
+					// It's a file
+					if (await this.evaluateAutoArchiveRule(child, rule)) {
+						filesToArchive.push(child);
+					}
+				}
+			}
+
+			for (const file of filesToArchive) {
+				const result = await this.archiveFile(file);
+				if (result.success) {
+					totalArchived++;
+				}
+			}
+		}
+
+		if (totalArchived > 0) {
+			new Notice(`Auto-archive: ${totalArchived} files archived`);
+		}
+	}
+
+	private async evaluateAutoArchiveRule(
+		file: TAbstractFile,
+		rule: AutoArchiveRule
+	): Promise<boolean> {
+		// Skip if already archived
+		if (this.isFileArchived(file)) {
+			return false;
+		}
+
+		// All conditions must be met (AND logic)
+		for (const condition of rule.conditions) {
+			if (!(await this.evaluateCondition(file, condition))) {
+				return false;
+			}
+		}
+
+		return rule.conditions.length > 0;
+	}
+
+	private async evaluateCondition(
+		file: TAbstractFile,
+		condition: AutoArchiveCondition
+	): Promise<boolean> {
+		if (condition.type === "fileAge") {
+			const ageInDays = parseInt(condition.value);
+			if (isNaN(ageInDays)) {
+				return false;
+			}
+
+			const stats = await this.app.vault.adapter.stat(file.path);
+			if (!stats) {
+				return false;
+			}
+
+			const fileAgeMs = Date.now() - stats.mtime;
+			const fileAgeDays = fileAgeMs / (1000 * 60 * 60 * 24);
+			return fileAgeDays >= ageInDays;
+		} else if (condition.type === "regexPattern") {
+			try {
+				const regex = new RegExp(condition.value);
+				return regex.test(file.name);
+			} catch (error) {
+				console.error(
+					`Invalid regex pattern in auto-archive rule: ${condition.value}`,
+					error
+				);
+				return false;
+			}
+		}
+
+		return false;
+	}
+
 	private async loadSettings() {
 		this.settings = Object.assign(
 			{},
@@ -386,8 +525,164 @@ class SimpleArchiverPromptModal extends Modal {
 	}
 }
 
+class AutoArchiveRuleModal extends Modal {
+	plugin: SimpleArchiver;
+	rule: AutoArchiveRule;
+	onSave: () => Promise<void>;
+	folderPathInput: HTMLInputElement;
+
+	constructor(
+		app: App,
+		plugin: SimpleArchiver,
+		rule: AutoArchiveRule,
+		onSave: () => Promise<void>
+	) {
+		super(app);
+		this.plugin = plugin;
+		this.rule = rule;
+		this.onSave = onSave;
+	}
+
+	onOpen() {
+		const { contentEl } = this;
+		contentEl.empty();
+
+		this.setTitle("Edit Auto-Archive Rule");
+
+		// Folder path setting
+		new Setting(contentEl)
+			.setName("Folder path")
+			.setDesc("The folder to apply this rule to (e.g., 'Projects' or 'Notes/Daily')")
+			.addText((text) => {
+				this.folderPathInput = text.inputEl;
+				text.setPlaceholder("folder/path")
+					.setValue(this.rule.folderPath)
+					.onChange((value) => {
+						this.rule.folderPath = value;
+					});
+			});
+
+		// Conditions section
+		contentEl.createEl("h3", { text: "Conditions (all must be met)" });
+
+		const conditionsContainer = contentEl.createDiv({ cls: "auto-archive-conditions-container" });
+		this.displayConditions(conditionsContainer);
+
+		// Add condition button
+		new Setting(contentEl).addButton((button) =>
+			button.setButtonText("Add Condition").onClick(() => {
+				this.addCondition();
+			})
+		);
+
+		// Save and cancel buttons
+		new Setting(contentEl)
+			.addButton((button) =>
+				button
+					.setButtonText("Save")
+					.setCta()
+					.onClick(async () => {
+						await this.onSave();
+						this.close();
+					})
+			)
+			.addButton((button) =>
+				button.setButtonText("Cancel").onClick(() => {
+					// Remove rule if it's new and has no folder path
+					if (!this.rule.folderPath) {
+						this.plugin.settings.autoArchiveRules =
+							this.plugin.settings.autoArchiveRules.filter(
+								(r) => r.id !== this.rule.id
+							);
+					}
+					this.close();
+				})
+			);
+	}
+
+	private displayConditions(containerEl: HTMLElement): void {
+		containerEl.empty();
+
+		if (this.rule.conditions.length === 0) {
+			containerEl.createEl("p", {
+				text: "No conditions added yet. Add at least one condition.",
+				cls: "setting-item-description"
+			});
+			return;
+		}
+
+		for (let i = 0; i < this.rule.conditions.length; i++) {
+			const condition = this.rule.conditions[i];
+			this.displayCondition(containerEl, condition, i);
+		}
+	}
+
+	private displayCondition(
+		containerEl: HTMLElement,
+		condition: AutoArchiveCondition,
+		index: number
+	): void {
+		const conditionEl = containerEl.createDiv({ cls: "auto-archive-condition" });
+
+		new Setting(conditionEl)
+			.setName(`Condition ${index + 1}`)
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("fileAge", "File age (days)")
+					.addOption("regexPattern", "File name regex")
+					.setValue(condition.type)
+					.onChange((value) => {
+						condition.type = value as "fileAge" | "regexPattern";
+						condition.value = "";
+						this.displayConditions(containerEl);
+					})
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder(
+						condition.type === "fileAge"
+							? "Number of days"
+							: "Regular expression"
+					)
+					.setValue(condition.value)
+					.onChange((value) => {
+						condition.value = value;
+					})
+			)
+			.addButton((button) =>
+				button
+					.setButtonText("Remove")
+					.setWarning()
+					.onClick(() => {
+						this.rule.conditions.splice(index, 1);
+						this.displayConditions(containerEl);
+					})
+			);
+	}
+
+	private addCondition(): void {
+		this.rule.conditions.push({
+			type: "fileAge",
+			value: ""
+		});
+
+		const conditionsContainer = this.contentEl.querySelector(
+			".auto-archive-conditions-container"
+		) as HTMLElement;
+		if (conditionsContainer) {
+			this.displayConditions(conditionsContainer);
+		}
+	}
+
+	onClose() {
+		const { contentEl } = this;
+		contentEl.empty();
+	}
+}
+
 class SimpleArchiverSettingsTab extends PluginSettingTab {
 	plugin: SimpleArchiver;
+	activeTab: "general" | "autoArchive" = "general";
 
 	constructor(app: App, plugin: SimpleArchiver) {
 		super(app, plugin);
@@ -399,6 +694,38 @@ class SimpleArchiverSettingsTab extends PluginSettingTab {
 
 		containerEl.empty();
 
+		// Create tabs
+		const tabContainer = containerEl.createDiv({ cls: "setting-tab-container" });
+		const tabButtonContainer = tabContainer.createDiv({ cls: "setting-tab-buttons" });
+
+		const generalTabButton = tabButtonContainer.createEl("button", {
+			text: "General",
+			cls: this.activeTab === "general" ? "setting-tab-button active" : "setting-tab-button"
+		});
+		generalTabButton.addEventListener("click", () => {
+			this.activeTab = "general";
+			this.display();
+		});
+
+		const autoArchiveTabButton = tabButtonContainer.createEl("button", {
+			text: "Auto-Archive",
+			cls: this.activeTab === "autoArchive" ? "setting-tab-button active" : "setting-tab-button"
+		});
+		autoArchiveTabButton.addEventListener("click", () => {
+			this.activeTab = "autoArchive";
+			this.display();
+		});
+
+		const tabContent = containerEl.createDiv({ cls: "setting-tab-content" });
+
+		if (this.activeTab === "general") {
+			this.displayGeneralSettings(tabContent);
+		} else {
+			this.displayAutoArchiveSettings(tabContent);
+		}
+	}
+
+	private displayGeneralSettings(containerEl: HTMLElement): void {
 		new Setting(containerEl)
 			.setName("Archive folder")
 			.setDesc(
@@ -417,6 +744,139 @@ class SimpleArchiverSettingsTab extends PluginSettingTab {
 						}
 					})
 			);
+	}
+
+	private displayAutoArchiveSettings(containerEl: HTMLElement): void {
+		// Auto-archive frequency setting
+		new Setting(containerEl)
+			.setName("Auto-archive frequency")
+			.setDesc("How often to check and process auto-archive rules")
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("5", "Every 5 minutes")
+					.addOption("15", "Every 15 minutes")
+					.addOption("30", "Every 30 minutes")
+					.addOption("60", "Every 60 minutes")
+					.addOption("360", "Every 6 hours")
+					.addOption("720", "Every 12 hours")
+					.addOption("1440", "Every 24 hours")
+					.addOption("2880", "Every 48 hours")
+					.setValue(this.plugin.settings.autoArchiveFrequency.toString())
+					.onChange(async (value) => {
+						this.plugin.settings.autoArchiveFrequency = parseInt(value);
+						await this.plugin.saveSettings();
+						this.plugin.scheduleAutoArchive();
+					})
+			);
+
+		// Add new rule button
+		new Setting(containerEl)
+			.setName("Auto-archive rules")
+			.setDesc("Define rules for automatically archiving files in specific folders")
+			.addButton((button) =>
+				button.setButtonText("Add Rule").onClick(() => {
+					this.addAutoArchiveRule();
+				})
+			);
+
+		// Display existing rules
+		const rulesContainer = containerEl.createDiv({ cls: "auto-archive-rules-container" });
+		this.displayAutoArchiveRules(rulesContainer);
+	}
+
+	private displayAutoArchiveRules(containerEl: HTMLElement): void {
+		if (this.plugin.settings.autoArchiveRules.length === 0) {
+			containerEl.createEl("p", {
+				text: "No auto-archive rules configured yet.",
+				cls: "setting-item-description"
+			});
+			return;
+		}
+
+		for (const rule of this.plugin.settings.autoArchiveRules) {
+			this.displayAutoArchiveRule(containerEl, rule);
+		}
+	}
+
+	private displayAutoArchiveRule(containerEl: HTMLElement, rule: AutoArchiveRule): void {
+		const ruleContainer = containerEl.createDiv({ cls: "auto-archive-rule" });
+
+		// Rule header with enable/disable toggle
+		new Setting(ruleContainer)
+			.setName(`Folder: ${rule.folderPath || "(not set)"}`)
+			.setClass("auto-archive-rule-header")
+			.addToggle((toggle) =>
+				toggle.setValue(rule.enabled).onChange(async (value) => {
+					rule.enabled = value;
+					await this.plugin.saveSettings();
+				})
+			)
+			.addButton((button) =>
+				button
+					.setButtonText("Edit")
+					.setClass("mod-cta")
+					.onClick(() => {
+						this.editAutoArchiveRule(rule);
+					})
+			)
+			.addButton((button) =>
+				button
+					.setButtonText("Delete")
+					.setWarning()
+					.onClick(async () => {
+						this.plugin.settings.autoArchiveRules =
+							this.plugin.settings.autoArchiveRules.filter(
+								(r) => r.id !== rule.id
+							);
+						await this.plugin.saveSettings();
+						this.display();
+					})
+			);
+
+		// Display conditions
+		const conditionsEl = ruleContainer.createDiv({ cls: "auto-archive-rule-conditions" });
+		if (rule.conditions.length === 0) {
+			conditionsEl.createEl("span", {
+				text: "No conditions set",
+				cls: "setting-item-description"
+			});
+		} else {
+			for (const condition of rule.conditions) {
+				const conditionText = this.getConditionText(condition);
+				conditionsEl.createEl("div", {
+					text: `• ${conditionText}`,
+					cls: "auto-archive-rule-condition"
+				});
+			}
+		}
+	}
+
+	private getConditionText(condition: AutoArchiveCondition): string {
+		if (condition.type === "fileAge") {
+			return `File age ≥ ${condition.value} days`;
+		} else if (condition.type === "regexPattern") {
+			return `File name matches: ${condition.value}`;
+		}
+		return "Unknown condition";
+	}
+
+	private addAutoArchiveRule(): void {
+		const newRule: AutoArchiveRule = {
+			id: Date.now().toString(),
+			enabled: true,
+			folderPath: "",
+			conditions: []
+		};
+
+		this.plugin.settings.autoArchiveRules.push(newRule);
+		this.editAutoArchiveRule(newRule);
+	}
+
+	private editAutoArchiveRule(rule: AutoArchiveRule): void {
+		new AutoArchiveRuleModal(this.app, this.plugin, rule, async () => {
+			await this.plugin.saveSettings();
+			this.display();
+		}).open();
 	}
 
 	private validateArchiveFolderName(value: string): boolean {
