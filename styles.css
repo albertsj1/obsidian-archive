@@ -8,6 +8,14 @@ If your plugin does not need CSS, delete this file.
 */
 
 /* Auto-archive settings styles */
+.setting-tab-container {
+	width: 100%;
+}
+
+.setting-tab-content {
+	padding-top: 12px;
+}
+
 .setting-tab-buttons {
 	display: flex;
 	gap: 8px;

@@ -9,6 +9,7 @@ import {
 	PluginSettingTab,
 	Setting,
 	TAbstractFile,
+	TFile,
 } from "obsidian";
 
 interface AutoArchiveCondition {
@@ -403,7 +404,7 @@ export default class SimpleArchiver extends Plugin {
 			const filesToArchive = [];
 
 			for (const child of folder.children) {
-				if (child.hasOwnProperty("extension")) {
+				if (child instanceof TFile) {
 					// It's a file
 					if (await this.evaluateAutoArchiveRule(child, rule)) {
 						filesToArchive.push(child);
@@ -587,13 +588,14 @@ class AutoArchiveRuleModal extends Modal {
 					})
 			)
 			.addButton((button) =>
-				button.setButtonText("Cancel").onClick(() => {
+				button.setButtonText("Cancel").onClick(async () => {
 					// Remove rule if it's new and has no folder path
 					if (!this.rule.folderPath) {
 						this.plugin.settings.autoArchiveRules =
 							this.plugin.settings.autoArchiveRules.filter(
 								(r) => r.id !== this.rule.id
 							);
+						await this.plugin.saveSettings();
 					}
 					this.close();
 				})
@@ -632,9 +634,12 @@ class AutoArchiveRuleModal extends Modal {
 					.addOption("regexPattern", "File name regex")
 					.setValue(condition.type)
 					.onChange((value) => {
-						condition.type = value as "fileAge" | "regexPattern";
-						condition.value = "";
-						this.displayConditions(containerEl);
+						const conditionType = value as "fileAge" | "regexPattern";
+						if (conditionType === "fileAge" || conditionType === "regexPattern") {
+							condition.type = conditionType;
+							condition.value = "";
+							this.displayConditions(containerEl);
+						}
 					})
 			)
 			.addText((text) =>
@@ -862,7 +867,7 @@ class SimpleArchiverSettingsTab extends PluginSettingTab {
 
 	private addAutoArchiveRule(): void {
 		const newRule: AutoArchiveRule = {
-			id: Date.now().toString(),
+			id: crypto.randomUUID(),
 			enabled: true,
 			folderPath: "",
 			conditions: []
