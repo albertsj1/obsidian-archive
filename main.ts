@@ -22,6 +22,8 @@ interface AutoArchiveRule {
 	id: string;
 	enabled: boolean;
 	folderPath: string;
+	useFolderRegex: boolean;
+	applyRecursively: boolean;
 	conditions: AutoArchiveCondition[];
 	logicOperator: "AND" | "OR";
 }
@@ -237,6 +239,8 @@ export default class SimpleArchiver extends Plugin {
 						id: crypto.randomUUID(),
 						enabled: true,
 						folderPath: folderPath,
+						useFolderRegex: false,
+						applyRecursively: false,
 						conditions: [],
 						logicOperator: "AND"
 					};
@@ -487,21 +491,47 @@ export default class SimpleArchiver extends Plugin {
 		let totalArchived = 0;
 
 		for (const rule of enabledRules) {
-			const folder = this.app.vault.getFolderByPath(
-				normalizePath(rule.folderPath)
-			);
+			let foldersToProcess: TFolder[] = [];
 
-			if (!folder) {
-				continue;
+			if (rule.useFolderRegex) {
+				// Use regex to match folder paths
+				try {
+					const regex = new RegExp(rule.folderPath);
+					const allFolders = this.app.vault.getAllFolders();
+					foldersToProcess = allFolders.filter((folder) =>
+						regex.test(folder.path)
+					);
+				} catch (error) {
+					console.error(
+						`Invalid regex pattern in auto-archive rule: ${rule.folderPath}`,
+						error
+					);
+					continue;
+				}
+			} else {
+				// Use exact folder path
+				const folder = this.app.vault.getFolderByPath(
+					normalizePath(rule.folderPath)
+				);
+
+				if (!folder) {
+					continue;
+				}
+
+				foldersToProcess = [folder];
 			}
 
 			const filesToArchive = [];
 
-			for (const child of folder.children) {
-				if (child instanceof TFile) {
-					// It's a file
-					if (await this.evaluateAutoArchiveRule(child, rule)) {
-						filesToArchive.push(child);
+			for (const folder of foldersToProcess) {
+				const files = await this.getFilesFromFolder(
+					folder,
+					rule.applyRecursively || false
+				);
+
+				for (const file of files) {
+					if (await this.evaluateAutoArchiveRule(file, rule)) {
+						filesToArchive.push(file);
 					}
 				}
 			}
@@ -517,6 +547,23 @@ export default class SimpleArchiver extends Plugin {
 		if (totalArchived > 0) {
 			console.log(`Auto-archive: ${totalArchived} files archived`);
 		}
+	}
+
+	private getFilesFromFolder(
+		folder: TFolder,
+		recursive: boolean
+	): TFile[] {
+		const files: TFile[] = [];
+
+		for (const child of folder.children) {
+			if (child instanceof TFile) {
+				files.push(child);
+			} else if (recursive && child instanceof TFolder) {
+				files.push(...this.getFilesFromFolder(child, recursive));
+			}
+		}
+
+		return files;
 	}
 
 	private async evaluateAutoArchiveRule(
@@ -599,11 +646,24 @@ export default class SimpleArchiver extends Plugin {
 		let needsSave = false;
 		if (this.settings.autoArchiveRules) {
 			this.settings.autoArchiveRules = this.settings.autoArchiveRules.map(rule => {
+				const updates: Partial<AutoArchiveRule> = {};
+				
 				if (!rule.logicOperator) {
 					needsSave = true;
-					return { ...rule, logicOperator: "AND" as "AND" | "OR" };
+					updates.logicOperator = "AND" as "AND" | "OR";
 				}
-				return rule;
+				
+				if (rule.useFolderRegex === undefined) {
+					needsSave = true;
+					updates.useFolderRegex = false;
+				}
+				
+				if (rule.applyRecursively === undefined) {
+					needsSave = true;
+					updates.applyRecursively = false;
+				}
+				
+				return { ...rule, ...updates };
 			});
 		}
 		
@@ -692,6 +752,30 @@ class AutoArchiveRuleModal extends Modal {
 						this.rule.folderPath = value;
 					});
 			});
+
+		// Use folder regex checkbox
+		new Setting(contentEl)
+			.setName("Use folder path as regular expression")
+			.setDesc("When enabled, the folder path will be treated as a regular expression pattern to match multiple folders")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.rule.useFolderRegex || false)
+					.onChange((value) => {
+						this.rule.useFolderRegex = value;
+					})
+			);
+
+		// Apply recursively checkbox
+		new Setting(contentEl)
+			.setName("Apply recursively to subfolders")
+			.setDesc("When enabled, the rule will be applied to all files in subfolders as well")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.rule.applyRecursively || false)
+					.onChange((value) => {
+						this.rule.applyRecursively = value;
+					})
+			);
 
 		// Logic operator setting
 		new Setting(contentEl)
@@ -1040,6 +1124,8 @@ class SimpleArchiverSettingsTab extends PluginSettingTab {
 			id: crypto.randomUUID(),
 			enabled: true,
 			folderPath: "",
+			useFolderRegex: false,
+			applyRecursively: false,
 			conditions: [],
 			logicOperator: "AND"
 		};
