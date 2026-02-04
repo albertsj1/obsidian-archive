@@ -10,6 +10,7 @@ import {
 	Setting,
 	TAbstractFile,
 	TFile,
+	TFolder,
 } from "obsidian";
 
 interface AutoArchiveCondition {
@@ -181,6 +182,78 @@ export default class SimpleArchiver extends Plugin {
 				});
 			})
 		);
+
+		// Folder context menu for auto-archive
+		this.registerEvent(
+			this.app.workspace.on("file-menu", (menu, file) => {
+				// Only show for folders
+				if (!(file instanceof TFolder)) {
+					return;
+				}
+
+				menu.addItem((item) => {
+					item.setTitle("Auto-archive")
+						.setIcon("clock")
+						.onClick(() => {
+							// This creates a placeholder, the actual submenu is added below
+						});
+					
+					// Add submenu
+					const submenu = (item as any).setSubmenu();
+					submenu.addItem((subitem: any) => {
+						subitem
+							.setTitle("Add rule")
+							.setIcon("plus")
+							.onClick(() => {
+								this.openAutoArchiveRuleForFolder(file.path);
+							});
+					});
+				});
+			})
+		);
+	}
+
+	openAutoArchiveRuleForFolder(folderPath: string): void {
+		// Open settings with auto-archive tab
+		const setting = (this.app as any).setting;
+		
+		// Open the settings if not already open
+		setting.open();
+		
+		// Open our plugin's settings tab by ID
+		const pluginId = this.manifest.id;
+		setting.openTabById(pluginId);
+		
+		// Give the settings tab time to render
+		setTimeout(() => {
+			// Get the settings tab and set it to auto-archive
+			const tabs = setting.pluginTabs as PluginSettingTab[];
+			for (const tab of tabs) {
+				if (tab instanceof SimpleArchiverSettingsTab) {
+					tab.activeTab = "autoArchive";
+					tab.display();
+					
+					// Create new rule with pre-filled folder path
+					const newRule: AutoArchiveRule = {
+						id: crypto.randomUUID(),
+						enabled: true,
+						folderPath: folderPath,
+						conditions: [],
+						logicOperator: "AND"
+					};
+
+					this.settings.autoArchiveRules.push(newRule);
+					
+					// Open the rule modal
+					new AutoArchiveRuleModal(this.app, this, newRule, async () => {
+						await this.saveSettings();
+						tab.display();
+					}).open();
+					
+					break;
+				}
+			}
+		}, 100);
 	}
 
 	private isFileArchived(file: TAbstractFile): boolean {
@@ -800,10 +873,24 @@ class SimpleArchiverSettingsTab extends PluginSettingTab {
 	}
 
 	private displayAutoArchiveSettings(containerEl: HTMLElement): void {
-		// Auto-archive frequency setting
+		// Auto-archive frequency setting with "Auto Archive Now" button
 		new Setting(containerEl)
 			.setName("Auto-archive frequency")
 			.setDesc("How often to check and process auto-archive rules")
+			.addButton((button) =>
+				button
+					.setButtonText("Auto Archive Now")
+					.setTooltip("Process auto-archive rules immediately")
+					.onClick(async () => {
+						button.setDisabled(true);
+						button.setButtonText("Processing...");
+						await this.plugin.processAutoArchiveRules();
+						this.plugin.scheduleAutoArchive(); // Reset the schedule
+						button.setButtonText("Auto Archive Now");
+						button.setDisabled(false);
+						new Notice("Auto-archive rules processed");
+					})
+			)
 			.addDropdown((dropdown) =>
 				dropdown
 					.addOption("5", "Every 5 minutes")
