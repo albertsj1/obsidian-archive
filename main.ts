@@ -244,16 +244,29 @@ export default class SimpleArchiver extends Plugin {
 
 					this.settings.autoArchiveRules.push(newRule);
 					
-					// Open the rule modal
-					new AutoArchiveRuleModal(this.app, this, newRule, async () => {
-						await this.saveSettings();
-						tab.display();
-					}).open();
+					// Open the rule modal with cancel callback to remove the rule if cancelled
+					new AutoArchiveRuleModal(
+						this.app, 
+						this, 
+						newRule, 
+						async () => {
+							await this.saveSettings();
+							tab.display();
+						},
+						async () => {
+							// Remove the rule if the user cancels
+							this.settings.autoArchiveRules = this.settings.autoArchiveRules.filter(
+								(r) => r.id !== newRule.id
+							);
+							await this.saveSettings();
+							tab.display();
+						}
+					).open();
 					
 					break;
 				}
 			}
-		}, 100);
+		}, 200);
 	}
 
 	private isFileArchived(file: TAbstractFile): boolean {
@@ -637,18 +650,21 @@ class AutoArchiveRuleModal extends Modal {
 	plugin: SimpleArchiver;
 	rule: AutoArchiveRule;
 	onSave: () => Promise<void>;
+	onCancel?: () => Promise<void>;
 	folderPathInput: HTMLInputElement;
 
 	constructor(
 		app: App,
 		plugin: SimpleArchiver,
 		rule: AutoArchiveRule,
-		onSave: () => Promise<void>
+		onSave: () => Promise<void>,
+		onCancel?: () => Promise<void>
 	) {
 		super(app);
 		this.plugin = plugin;
 		this.rule = rule;
 		this.onSave = onSave;
+		this.onCancel = onCancel;
 	}
 
 	onOpen() {
@@ -710,13 +726,18 @@ class AutoArchiveRuleModal extends Modal {
 			)
 			.addButton((button) =>
 				button.setButtonText("Cancel").onClick(async () => {
-					// Remove rule if it's new and has no folder path
-					if (!this.rule.folderPath) {
-						this.plugin.settings.autoArchiveRules =
-							this.plugin.settings.autoArchiveRules.filter(
-								(r) => r.id !== this.rule.id
-							);
-						await this.plugin.saveSettings();
+					// Call custom cancel callback if provided
+					if (this.onCancel) {
+						await this.onCancel();
+					} else {
+						// Remove rule if it's new and has no folder path (backward compatibility)
+						if (!this.rule.folderPath) {
+							this.plugin.settings.autoArchiveRules =
+								this.plugin.settings.autoArchiveRules.filter(
+									(r) => r.id !== this.rule.id
+								);
+							await this.plugin.saveSettings();
+						}
 					}
 					this.close();
 				})
