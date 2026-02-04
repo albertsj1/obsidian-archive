@@ -193,10 +193,7 @@ export default class SimpleArchiver extends Plugin {
 
 				menu.addItem((item) => {
 					item.setTitle("Auto-archive")
-						.setIcon("clock")
-						.onClick(() => {
-							// This creates a placeholder, the actual submenu is added below
-						});
+						.setIcon("clock");
 					
 					// Add submenu
 					const submenu = (item as any).setSubmenu();
@@ -224,7 +221,9 @@ export default class SimpleArchiver extends Plugin {
 		const pluginId = this.manifest.id;
 		setting.openTabById(pluginId);
 		
-		// Give the settings tab time to render
+		// Delay to allow settings tab to render before manipulating it
+		// This is necessary because settings tab rendering is asynchronous
+		const SETTINGS_TAB_RENDER_DELAY_MS = 200;
 		setTimeout(() => {
 			// Get the settings tab and set it to auto-archive
 			const tabs = setting.pluginTabs as PluginSettingTab[];
@@ -244,29 +243,37 @@ export default class SimpleArchiver extends Plugin {
 
 					this.settings.autoArchiveRules.push(newRule);
 					
-					// Open the rule modal with cancel callback to remove the rule if cancelled
-					new AutoArchiveRuleModal(
-						this.app, 
-						this, 
-						newRule, 
-						async () => {
-							await this.saveSettings();
-							tab.display();
-						},
-						async () => {
-							// Remove the rule if the user cancels
-							this.settings.autoArchiveRules = this.settings.autoArchiveRules.filter(
-								(r) => r.id !== newRule.id
-							);
-							await this.saveSettings();
-							tab.display();
-						}
-					).open();
+					try {
+						// Open the rule modal with cancel callback to remove the rule if cancelled
+						new AutoArchiveRuleModal(
+							this.app, 
+							this, 
+							newRule, 
+							async () => {
+								await this.saveSettings();
+								tab.display();
+							},
+							async () => {
+								// Remove the rule if the user cancels
+								this.settings.autoArchiveRules = this.settings.autoArchiveRules.filter(
+									(r) => r.id !== newRule.id
+								);
+								await this.saveSettings();
+								tab.display();
+							}
+						).open();
+					} catch (error) {
+						// If modal creation fails, clean up the rule
+						this.settings.autoArchiveRules = this.settings.autoArchiveRules.filter(
+							(r) => r.id !== newRule.id
+						);
+						console.error("Failed to open auto-archive rule modal:", error);
+					}
 					
 					break;
 				}
 			}
-		}, 200);
+		}, SETTINGS_TAB_RENDER_DELAY_MS);
 	}
 
 	private isFileArchived(file: TAbstractFile): boolean {
